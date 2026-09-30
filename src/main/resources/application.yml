@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: short-link
+  profiles:
+    active: dev
+
+server:
+  port: 8080
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    # 开发期打印 SQL，压测时切换 benchmark profile 关闭
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+  global-config:
+    banner: false
+    db-config:
+      # 逻辑删除：del_flag 0 未删 / 1 已删
+      logic-delete-field: delFlag
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# 短链系统自有配置
+shortlink:
+  # 短链域名（V0 简化：全局统一域名，不做多域名路由）
+  domain: localhost:8080
+  # 发号器类型：V0=auto（数据库自增），后续版本支持 redis / segment / snowflake，可配置切换
+  id-generator-type: auto
+  # 缓存配置（V1.1）
+  cache:
+    # 正常短链缓存基础 TTL（秒）
+    ttl-seconds: 1800
+    # TTL 随机抖动上限（秒）：基础 TTL + [0, jitter]，防止大量 key 同时过期
+    jitter-seconds: 600
+    # 空值缓存 TTL（秒）：防穿透，短 TTL 避免刚创建的短码被空值挡住
+    null-ttl-seconds: 60
+
+# 接口文档
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
