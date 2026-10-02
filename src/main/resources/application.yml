@@ -26,14 +26,20 @@ shortlink:
   domain: localhost:8080
   # 发号器类型：V0=auto（数据库自增），后续版本支持 redis / segment / snowflake，可配置切换
   id-generator-type: auto
+  # 访问统计开关（V1.3）：关闭后跳转不再写统计
+  stats-enabled: true
   # 缓存配置（V1.1）
   cache:
+    # 缓存总开关：false 时跳转直查 DB（等价 V0，用于压测基线与降级）
+    enabled: true
     # 正常短链缓存基础 TTL（秒）
     ttl-seconds: 1800
     # TTL 随机抖动上限（秒）：基础 TTL + [0, jitter]，防止大量 key 同时过期
     jitter-seconds: 600
     # 空值缓存 TTL（秒）：防穿透，短 TTL 避免刚创建的短码被空值挡住
     null-ttl-seconds: 60
+    # 统计 key TTL（秒）：默认 7 天
+    stats-ttl-seconds: 604800
 
 # 接口文档
 springdoc:

@@ -17,6 +17,7 @@ public final class CacheKeyBuilder {
     public static final String NULL_MARKER = "null";
 
     private static final String LINK_KEY_PREFIX = "short-link:link:";
+    private static final String STATS_KEY_PREFIX = "short-link:stats:";
 
     private CacheKeyBuilder() {
     }
@@ -26,6 +27,27 @@ public final class CacheKeyBuilder {
      */
     public static String buildLinkKey(String domain, String code) {
         return LINK_KEY_PREFIX + domain + ":" + code;
+    }
+
+    /**
+     * 日 PV 计数 key（String INCR）
+     */
+    public static String buildPvKey(String date, String code) {
+        return STATS_KEY_PREFIX + "pv:" + date + ":" + code;
+    }
+
+    /**
+     * 日 UV 去重 key（HyperLogLog，约 12KB/key，可容纳海量基数，远优于 Set）
+     */
+    public static String buildUvKey(String date, String code) {
+        return STATS_KEY_PREFIX + "uv:" + date + ":" + code;
+    }
+
+    /**
+     * 日独立 IP 去重 key（HyperLogLog）
+     */
+    public static String buildIpKey(String date, String code) {
+        return STATS_KEY_PREFIX + "ip:" + date + ":" + code;
     }
 
     /**

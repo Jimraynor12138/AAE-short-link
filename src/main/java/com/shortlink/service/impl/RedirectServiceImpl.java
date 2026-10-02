@@ -9,6 +9,7 @@ import com.shortlink.dao.LinkMapper;
 import com.shortlink.dto.LinkCacheDTO;
 import com.shortlink.entity.LinkDO;
 import com.shortlink.service.RedirectService;
+import com.shortlink.service.StatsService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -34,54 +35,76 @@ public class RedirectServiceImpl implements RedirectService {
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
     private final ShortLinkProperties properties;
+    private final StatsService statsService;
 
     @Override
-    public String resolveRedirectUrl(String code) {
+    public String resolveRedirectUrl(String code, String clientIp, String userAgent) {
         String key = CacheKeyBuilder.buildLinkKey(properties.getDomain(), code);
+        boolean cacheEnabled = properties.getCache().isEnabled();
 
-        // 1. 查缓存（命中则不碰 DB）
-        try {
-            String cached = stringRedisTemplate.opsForValue().get(key);
-            if (cached != null) {
-                if (CacheKeyBuilder.NULL_MARKER.equals(cached)) {
-                    // 空值缓存：该短码确认不存在
-                    return null;
+        // 1. 查缓存（命中则不碰 DB）。cache.enabled=false 时整段跳过，等价 V0 行为
+        if (cacheEnabled) {
+            try {
+                String cached = stringRedisTemplate.opsForValue().get(key);
+                if (cached != null) {
+                    if (CacheKeyBuilder.NULL_MARKER.equals(cached)) {
+                        // 空值缓存：该短码确认不存在
+                        return null;
+                    }
+                    try {
+                        LinkCacheDTO dto = objectMapper.readValue(cached, LinkCacheDTO.class);
+                        return redirectOrNull(dto, code, clientIp, userAgent);
+                    } catch (JsonProcessingException e) {
+                        // 缓存值损坏（如手工改过/版本升级字段变更）：不直接失败，回源查询
+                        log.warn("缓存值反序列化失败，回源查询, key={}", key, e);
+                    }
                 }
-                try {
-                    LinkCacheDTO dto = objectMapper.readValue(cached, LinkCacheDTO.class);
-                    return isRedirectable(dto) ? dto.getOriginalUrl() : null;
-                } catch (JsonProcessingException e) {
-                    // 缓存值损坏（如手工改过/版本升级字段变更）：不直接失败，回源查询
-                    log.warn("缓存值反序列化失败，回源查询, key={}", key, e);
-                }
+            } catch (Exception e) {
+                // Redis 故障：降级直查 DB，跳转可用性优先
+                log.error("Redis 读取异常，降级直查数据库, code={}", code, e);
             }
-        } catch (Exception e) {
-            // Redis 故障：降级直查 DB，跳转可用性优先
-            log.error("Redis 读取异常，降级直查数据库, code={}", code, e);
         }
 
-        // 2. 未命中/降级 → 查 DB
+        // 2. 未命中/降级/缓存关闭 → 查 DB
         LinkDO link = findByCode(code);
         if (link == null) {
             // 3. 空值缓存防穿透（短 TTL：避免刚创建的短码被空值挡住）
-            safeSetCache(key, CacheKeyBuilder.NULL_MARKER, properties.getCache().getNullTtlSeconds());
+            if (cacheEnabled) {
+                safeSetCache(key, CacheKeyBuilder.NULL_MARKER, properties.getCache().getNullTtlSeconds());
+            }
             return null;
         }
 
         // 4. 回填缓存：缓存数据快照（非结论），TTL 加随机抖动防集体过期
         LinkCacheDTO dto = toCacheDTO(link);
-        try {
-            String json = objectMapper.writeValueAsString(dto);
-            long ttl = CacheKeyBuilder.jitteredTtlSeconds(
-                    properties.getCache().getTtlSeconds(),
-                    properties.getCache().getJitterSeconds());
-            safeSetCache(key, json, ttl);
-        } catch (JsonProcessingException e) {
-            log.warn("缓存值序列化失败，跳过回填, code={}", code, e);
+        if (cacheEnabled) {
+            try {
+                String json = objectMapper.writeValueAsString(dto);
+                long ttl = CacheKeyBuilder.jitteredTtlSeconds(
+                        properties.getCache().getTtlSeconds(),
+                        properties.getCache().getJitterSeconds());
+                safeSetCache(key, json, ttl);
+            } catch (JsonProcessingException e) {
+                log.warn("缓存值序列化失败，跳过回填, code={}", code, e);
+            }
         }
 
         // 5. 每次读取时应用侧校验（停用/过期以最新时间为准）
-        return isRedirectable(dto) ? dto.getOriginalUrl() : null;
+        return redirectOrNull(dto, code, clientIp, userAgent);
+    }
+
+    /**
+     * 校验通过则记录访问统计并返回目标 URL，否则返回 null（停用/过期不统计）
+     */
+    private String redirectOrNull(LinkCacheDTO dto, String code, String clientIp, String userAgent) {
+        if (!isRedirectable(dto)) {
+            return null;
+        }
+        // stats-enabled=false 时跳过统计写入（压测对比 / 故障降级用）
+        if (properties.isStatsEnabled()) {
+            statsService.recordVisit(code, clientIp, userAgent);
+        }
+        return dto.getOriginalUrl();
     }
 
     /**

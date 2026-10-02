@@ -17,6 +17,7 @@ import com.shortlink.idgenerator.IdGenerator;
 import com.shortlink.service.LinkService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -38,6 +39,9 @@ public class LinkServiceImpl implements LinkService {
     /** 分组缺省值 */
     public static final String DEFAULT_GID = "default";
 
+    /** 短码冲突时的最大重试次数（含首次尝试） */
+    private static final int MAX_CREATE_RETRY = 3;
+
     /**
      * 长 URL 格式校验：
      * 协议限定 http/https；主机名允许无点的 localhost / 纯 IP；
@@ -56,7 +60,27 @@ public class LinkServiceImpl implements LinkService {
     public LinkRespDTO createLink(LinkCreateReqDTO reqDTO) {
         validateCreate(reqDTO);
 
-        long id = idGenerator.nextId();
+        // 发号 → Base62 → 落库；遇唯一键冲突则重新发号重试。
+        // 为什么需要重试：V1.2 起号源是 Redis INCR，Redis 丢计数/清空后可能回到已用过的号，
+        // 此时 (domain, code) 唯一索引会拦截插入 —— 这是发号方案的最后一道防线。
+        for (int attempt = 1; ; attempt++) {
+            long id = idGenerator.nextId();
+            LinkDO link = buildLinkDO(id, reqDTO);
+            try {
+                linkMapper.insert(link);
+                log.info("创建短链: id={}, code={}, url={}", link.getId(), link.getCode(), link.getOriginalUrl());
+                return toRespDTO(link);
+            } catch (DuplicateKeyException e) {
+                if (attempt >= MAX_CREATE_RETRY) {
+                    log.error("短码连续冲突，放弃创建: attempts={}, code={}", attempt, link.getCode(), e);
+                    throw new BizException("短码生成冲突，请稍后重试");
+                }
+                log.warn("短码冲突，重新发号重试: attempt={}, code={}", attempt, link.getCode());
+            }
+        }
+    }
+
+    private LinkDO buildLinkDO(long id, LinkCreateReqDTO reqDTO) {
         LinkDO link = new LinkDO();
         link.setId(id);
         link.setCode(Base62Codec.encode(id));
@@ -67,10 +91,7 @@ public class LinkServiceImpl implements LinkService {
         link.setValidType(reqDTO.getValidType());
         link.setValidDate(reqDTO.getValidType() == 2 ? reqDTO.getValidDate() : null);
         link.setDescription(reqDTO.getDescription());
-
-        linkMapper.insert(link);
-        log.info("创建短链: id={}, code={}, url={}", link.getId(), link.getCode(), link.getOriginalUrl());
-        return toRespDTO(link);
+        return link;
     }
 
     @Override
