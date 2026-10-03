@@ -19,3 +19,21 @@ spring:
       # 本地无密码，password 省略
       timeout: 2s
       connect-timeout: 2s
+  # RabbitMQ（本地安装，guest 仅允许从 localhost 连接）
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    listener:
+      simple:
+        # 并发消费者数：生产端（跳转）往往远快于单消费者，靠并发/多实例扩容拉平速度
+        concurrency: 2
+        max-concurrency: 8
+        prefetch: 50
+        # 重试用尽后不重新入队 → 消息进入死信队列（避免无限重试打爆日志）
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 500ms

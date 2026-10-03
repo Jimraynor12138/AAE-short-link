@@ -34,6 +34,69 @@ public class ShortLinkProperties {
      */
     private boolean statsEnabled = true;
 
+    /**
+     * MQ 异步统计配置（V2）
+     */
+    private Mq mq = new Mq();
+
+    /**
+     * 统计聚合落库配置（V2）
+     */
+    private StatsPersist statsPersist = new StatsPersist();
+
+    @Data
+    public static class Mq {
+
+        /**
+         * false 时退化为 V1 的同步统计（降级路径）。
+         * 场景：MQ 不可用、或压测做对照实验
+         */
+        private boolean enabled = true;
+
+        private String exchange = "short-link.visit.exchange";
+
+        private String queue = "short-link.visit.queue";
+
+        private String routingKey = "short-link.visit";
+
+        private String deadLetterExchange = "short-link.visit.dlx";
+
+        private String deadLetterQueue = "short-link.visit.dlq";
+
+        /**
+         * 消费幂等 key 保留时间（秒）= 允许的消息重投窗口。
+         *
+         * 容量约束：key 数量 ≈ 峰值 QPS × TTL。
+         * 例如 3000 QPS × 60s ≈ 18 万个 key（约 20MB），而 600s 会放大到 180 万个（约 200MB）。
+         * 因此该值应贴近「实际重投间隔」而不是取大值。
+         */
+        private long idempotentTtlSeconds = 60;
+    }
+
+    @Data
+    public static class StatsPersist {
+
+        /**
+         * 统计快照落库间隔（毫秒）。
+         * 注意：@Scheduled 的 fixedDelayString 只接受毫秒数字符串，
+         * 写成 "2s" 会启动失败（Invalid fixedDelayString value），
+         * 也不要用 "2"，那会被当成 2 毫秒导致疯狂写库
+         */
+        private long flushIntervalMs = 2000;
+
+        /** 单次 flush 最大条目数，防止一次写库过多 */
+        private int maxBatchSize = 1000;
+
+        /**
+         * 是否启用「定时兜底扫描」（启动时的那一次始终执行）。
+         *
+         * 用布尔开关而不是间隔数值：@Scheduled 的 fixedDelay 若被配成 0，
+         * 会变成 0 延迟高频空转并占满单线程调度器（连带拖慢 flush），
+         * 所以间隔在代码里固定为常量，只暴露开关。
+         */
+        private boolean rescanEnabled = true;
+    }
+
     @Data
     public static class Cache {
 

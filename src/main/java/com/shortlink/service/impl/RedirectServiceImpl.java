@@ -9,7 +9,7 @@ import com.shortlink.dao.LinkMapper;
 import com.shortlink.dto.LinkCacheDTO;
 import com.shortlink.entity.LinkDO;
 import com.shortlink.service.RedirectService;
-import com.shortlink.service.StatsService;
+import com.shortlink.service.VisitRecorder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -35,10 +35,10 @@ public class RedirectServiceImpl implements RedirectService {
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
     private final ShortLinkProperties properties;
-    private final StatsService statsService;
+    private final VisitRecorder visitRecorder;
 
     @Override
-    public String resolveRedirectUrl(String code, String clientIp, String userAgent) {
+    public String resolveRedirectUrl(String code, String clientIp, String userAgent, String referer) {
         String key = CacheKeyBuilder.buildLinkKey(properties.getDomain(), code);
         boolean cacheEnabled = properties.getCache().isEnabled();
 
@@ -53,7 +53,7 @@ public class RedirectServiceImpl implements RedirectService {
                     }
                     try {
                         LinkCacheDTO dto = objectMapper.readValue(cached, LinkCacheDTO.class);
-                        return redirectOrNull(dto, code, clientIp, userAgent);
+                        return redirectOrNull(dto, code, clientIp, userAgent, referer);
                     } catch (JsonProcessingException e) {
                         // 缓存值损坏（如手工改过/版本升级字段变更）：不直接失败，回源查询
                         log.warn("缓存值反序列化失败，回源查询, key={}", key, e);
@@ -90,19 +90,20 @@ public class RedirectServiceImpl implements RedirectService {
         }
 
         // 5. 每次读取时应用侧校验（停用/过期以最新时间为准）
-        return redirectOrNull(dto, code, clientIp, userAgent);
+        return redirectOrNull(dto, code, clientIp, userAgent, referer);
     }
 
     /**
-     * 校验通过则记录访问统计并返回目标 URL，否则返回 null（停用/过期不统计）
+     * 校验通过则记录访问并返回目标 URL，否则返回 null（停用/过期不统计）
      */
-    private String redirectOrNull(LinkCacheDTO dto, String code, String clientIp, String userAgent) {
+    private String redirectOrNull(LinkCacheDTO dto, String code, String clientIp, String userAgent, String referer) {
         if (!isRedirectable(dto)) {
             return null;
         }
-        // stats-enabled=false 时跳过统计写入（压测对比 / 故障降级用）
+        // stats-enabled=false 时跳过统计（压测对比 / 故障降级用）
         if (properties.isStatsEnabled()) {
-            statsService.recordVisit(code, clientIp, userAgent);
+            // V2：默认只投递一条 MQ 消息就返回，统计处理不在跳转线程里做
+            visitRecorder.record(code, clientIp, userAgent, referer);
         }
         return dto.getOriginalUrl();
     }

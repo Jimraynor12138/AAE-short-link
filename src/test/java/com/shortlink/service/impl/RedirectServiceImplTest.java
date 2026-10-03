@@ -6,7 +6,7 @@ import com.shortlink.config.ShortLinkProperties;
 import com.shortlink.dao.LinkMapper;
 import com.shortlink.dto.LinkCacheDTO;
 import com.shortlink.entity.LinkDO;
-import com.shortlink.service.StatsService;
+import com.shortlink.service.VisitRecorder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -47,7 +47,7 @@ class RedirectServiceImplTest {
     private ValueOperations<String, String> valueOperations;
 
     @Mock
-    private StatsService statsService;
+    private VisitRecorder visitRecorder;
 
     private RedirectServiceImpl redirectService;
     private ObjectMapper objectMapper;
@@ -59,13 +59,13 @@ class RedirectServiceImplTest {
         properties.setDomain("localhost:8080");
         objectMapper = new ObjectMapper();
         objectMapper.findAndRegisterModules();
-        redirectService = new RedirectServiceImpl(linkMapper, stringRedisTemplate, objectMapper, properties, statsService);
+        redirectService = new RedirectServiceImpl(linkMapper, stringRedisTemplate, objectMapper, properties, visitRecorder);
         lenient().when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
     }
 
-    /** 统一的调用入口（V1.3 起签名含 IP/UA） */
+    /** 统一的调用入口（V2 起签名含 IP/UA/Referer） */
     private String resolve(String code) {
-        return redirectService.resolveRedirectUrl(code, "127.0.0.1", "JUnit-Agent");
+        return redirectService.resolveRedirectUrl(code, "127.0.0.1", "JUnit-Agent", null);
     }
 
     private LinkCacheDTO cacheDTO(Integer enableStatus, Integer validType, LocalDateTime validDate) {
@@ -171,14 +171,21 @@ class RedirectServiceImplTest {
     void recordsVisitOnSuccessfulRedirect() throws Exception {
         when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(cacheDTO(0, 1, null)));
         assertEquals("https://example.com/target", resolve("abc123"));
-        verify(statsService).recordVisit("abc123", "127.0.0.1", "JUnit-Agent");
+        verify(visitRecorder).record("abc123", "127.0.0.1", "JUnit-Agent", null);
+    }
+
+    @Test
+    void passesRefererToRecorder() throws Exception {
+        when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(cacheDTO(0, 1, null)));
+        redirectService.resolveRedirectUrl("abc123", "10.0.0.1", "UA", "https://www.baidu.com/s?wd=x");
+        verify(visitRecorder).record("abc123", "10.0.0.1", "UA", "https://www.baidu.com/s?wd=x");
     }
 
     @Test
     void doesNotRecordVisitWhenNotRedirectable() throws Exception {
         when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(cacheDTO(1, 1, null)));
         assertNull(resolve("abc123"));
-        verify(statsService, never()).recordVisit(anyString(), anyString(), anyString());
+        verify(visitRecorder, never()).record(anyString(), anyString(), anyString(), any());
     }
 
     @Test
@@ -199,7 +206,7 @@ class RedirectServiceImplTest {
 
         assertEquals("https://example.com/target", resolve("abc123"));
 
-        verify(statsService, never()).recordVisit(anyString(), anyString(), anyString());
+        verify(visitRecorder, never()).record(anyString(), anyString(), anyString(), any());
     }
 
     @Test

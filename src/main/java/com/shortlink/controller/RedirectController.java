@@ -25,6 +25,7 @@ public class RedirectController {
 
     private static final String HEADER_USER_AGENT = "User-Agent";
     private static final String HEADER_X_FORWARDED_FOR = "X-Forwarded-For";
+    private static final String HEADER_REFERER = "Referer";
 
     private final RedirectService redirectService;
 
@@ -35,7 +36,7 @@ public class RedirectController {
     @GetMapping("/{code:[0-9a-zA-Z]{1,16}}")
     public ResponseEntity<Void> redirect(@PathVariable("code") String code, HttpServletRequest request) {
         String target = redirectService.resolveRedirectUrl(code, resolveClientIp(request),
-                request.getHeader(HEADER_USER_AGENT));
+                request.getHeader(HEADER_USER_AGENT), request.getHeader(HEADER_REFERER));
         if (target == null) {
             // 不存在 / 已删除 / 已停用 / 已过期，统一 404，不泄露具体原因
             return ResponseEntity.notFound().build();

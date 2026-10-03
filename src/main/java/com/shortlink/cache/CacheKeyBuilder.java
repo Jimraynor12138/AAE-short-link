@@ -51,6 +51,20 @@ public final class CacheKeyBuilder {
     }
 
     /**
+     * 日来源分布 key（Hash：来源域名 -> 次数），V2 新增
+     */
+    public static String buildRefererKey(String date, String code) {
+        return STATS_KEY_PREFIX + "referer:" + date + ":" + code;
+    }
+
+    /**
+     * 日设备分布 key（Hash：设备类型 -> 次数），V2 新增
+     */
+    public static String buildDeviceKey(String date, String code) {
+        return STATS_KEY_PREFIX + "device:" + date + ":" + code;
+    }
+
+    /**
      * 计算带随机抖动的实际 TTL（秒）：
      * base + [0, jitter]，防止大量 key 在同一时刻集体过期引发缓存雪崩
      */

@@ -3,6 +3,11 @@ spring:
     name: short-link
   profiles:
     active: dev
+  # 定时任务线程池：默认只有 1 个线程，统计 flush 与兜底扫描会互相排队
+  task:
+    scheduling:
+      pool:
+        size: 2
 
 server:
   port: 8080
@@ -28,6 +33,25 @@ shortlink:
   id-generator-type: auto
   # 访问统计开关（V1.3）：关闭后跳转不再写统计
   stats-enabled: true
+  # MQ 异步统计（V2）
+  mq:
+    # false 时退化为 V1 的同步统计（降级路径，也是压测对比的对照组）
+    enabled: true
+    exchange: short-link.visit.exchange
+    queue: short-link.visit.queue
+    routing-key: short-link.visit
+    dead-letter-exchange: short-link.visit.dlx
+    dead-letter-queue: short-link.visit.dlq
+    # 消费幂等 key 保留时间（秒）= 允许的重投窗口。
+    # key 数量 ≈ 峰值 QPS × TTL，所以不要取大值（60s 已覆盖秒级重投）
+    idempotent-ttl-seconds: 60
+  # 统计快照落库（V2：脏标记 + 定时批量 upsert）
+  stats-persist:
+    # 毫秒；@Scheduled 只认毫秒数字符串，写 "2s" 会启动失败
+    flush-interval-ms: 2000
+    max-batch-size: 1000
+    # 定时兜底扫描开关（间隔在代码中固定为 10 分钟）：自愈重启丢脏标记导致的漏写
+    rescan-enabled: true
   # 缓存配置（V1.1）
   cache:
     # 缓存总开关：false 时跳转直查 DB（等价 V0，用于压测基线与降级）
