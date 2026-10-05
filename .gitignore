@@ -8,11 +8,13 @@ target/
 *.iml
 *.ipr
 *.iws
-docs
 .vscode/
 .settings/
 .classpath
 .project
+
+### AI Agent 工作目录（本地数据，不进 Git） ###
+.codebuddy/
 
 ### OS ###
 .DS_Store
@@ -24,3 +26,7 @@ logs/
 
 ### 本地环境配置（凭据不进 Git） ###
 src/main/resources/application-local.yml
+
+### 压测原始样本（单文件约 2MB、总计约 14MB，仅本地保留） ###
+### 报告与脚本已提交在 docs/benchmark/，原始数据可按 README 复现 ###
+docs/benchmark/results/
