@@ -45,6 +45,12 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- Caffeine（V3.3：本地一级缓存，解决热点 key 打满单个 Redis 分片） -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
         <!-- RabbitMQ（V2：访问统计异步化） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

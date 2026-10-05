@@ -18,6 +18,7 @@ public final class CacheKeyBuilder {
 
     private static final String LINK_KEY_PREFIX = "short-link:link:";
     private static final String STATS_KEY_PREFIX = "short-link:stats:";
+    private static final String REBUILD_LOCK_KEY_PREFIX = "short-link:lock:rebuild:";
 
     private CacheKeyBuilder() {
     }
@@ -27,6 +28,13 @@ public final class CacheKeyBuilder {
      */
     public static String buildLinkKey(String domain, String code) {
         return LINK_KEY_PREFIX + domain + ":" + code;
+    }
+
+    /**
+     * 缓存重建锁 key（V3.2 防击穿）：互斥重建与异步刷新共用，保证同一短码同一时刻只有一个重建者
+     */
+    public static String buildRebuildLockKey(String domain, String code) {
+        return REBUILD_LOCK_KEY_PREFIX + domain + ":" + code;
     }
 
     /**

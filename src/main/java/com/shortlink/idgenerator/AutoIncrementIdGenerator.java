@@ -1,5 +1,6 @@
 package com.shortlink.idgenerator;
 
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -31,6 +32,34 @@ public class AutoIncrementIdGenerator implements IdGenerator {
     private static final String INSERT_SQL = "INSERT INTO t_sequence(stub) VALUES (1)";
 
     private final JdbcTemplate jdbcTemplate;
+
+    /**
+     * 启动时把序列表的自增起点对齐到 t_link 的实际进度。
+     *
+     * 为什么需要：t_link.id 才是真实的 id 空间。若中途切换过发号器
+     * （例如先用 Redis 发号、后又切回 DB 自增），t_sequence 的计数会**远远落后**于
+     * t_link 的最大 id，于是新号全是已用过的号，创建会连续冲突。
+     * ALTER TABLE ... AUTO_INCREMENT 只能抬高、不会调低，天然是单调的。
+     */
+    @PostConstruct
+    public void alignSequenceWithLinks() {
+        long linkMaxId = queryLinkMaxId();
+        if (linkMaxId > 0) {
+            jdbcTemplate.execute("ALTER TABLE t_sequence AUTO_INCREMENT = " + (linkMaxId + 1));
+            log.info("DB 自增发号器已与 t_link 对齐: AUTO_INCREMENT={}", linkMaxId + 1);
+        }
+    }
+
+    @Override
+    public void recoverAfterConflict() {
+        // 冲突即说明序列表落后，重新对齐后再由上层重试
+        alignSequenceWithLinks();
+    }
+
+    private long queryLinkMaxId() {
+        Long maxId = jdbcTemplate.queryForObject("SELECT IFNULL(MAX(id), 0) FROM t_link", Long.class);
+        return maxId == null ? 0L : maxId;
+    }
 
     @Override
     public long nextId() {

@@ -2,10 +2,16 @@ package com.shortlink.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.shortlink.cache.CacheKeyBuilder;
+import com.shortlink.cache.CacheRebuildLock;
+import com.shortlink.cache.DegradationGuard;
+import com.shortlink.cache.LocalLinkCache;
+import com.shortlink.common.exception.DegradedException;
 import com.shortlink.config.ShortLinkProperties;
 import com.shortlink.dao.LinkMapper;
+import com.shortlink.bloom.ShortLinkBloomFilter;
 import com.shortlink.dto.LinkCacheDTO;
 import com.shortlink.entity.LinkDO;
+import com.shortlink.service.CacheRefreshService;
 import com.shortlink.service.VisitRecorder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +27,7 @@ import java.time.LocalDateTime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -49,6 +56,21 @@ class RedirectServiceImplTest {
     @Mock
     private VisitRecorder visitRecorder;
 
+    @Mock
+    private ShortLinkBloomFilter bloomFilter;
+
+    @Mock
+    private CacheRefreshService cacheRefreshService;
+
+    @Mock
+    private CacheRebuildLock rebuildLock;
+
+    @Mock
+    private LocalLinkCache localLinkCache;
+
+    @Mock
+    private DegradationGuard degradationGuard;
+
     private RedirectServiceImpl redirectService;
     private ObjectMapper objectMapper;
     private ShortLinkProperties properties;
@@ -57,10 +79,23 @@ class RedirectServiceImplTest {
     void setUp() {
         properties = new ShortLinkProperties();
         properties.setDomain("localhost:8080");
+        // 缩短互斥等待，避免测试变慢
+        properties.getCache().getAntiBreakdown().setMutexWaitMillis(60);
+        properties.getCache().getAntiBreakdown().setMutexWaitStepMillis(10);
         objectMapper = new ObjectMapper();
         objectMapper.findAndRegisterModules();
-        redirectService = new RedirectServiceImpl(linkMapper, stringRedisTemplate, objectMapper, properties, visitRecorder);
+        redirectService = new RedirectServiceImpl(linkMapper, stringRedisTemplate, objectMapper, properties,
+                visitRecorder, bloomFilter, cacheRefreshService, rebuildLock, localLinkCache, degradationGuard);
         lenient().when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        // 默认放行（等价 V2 行为）；需要验证拦截的用例单独打桩
+        lenient().when(bloomFilter.mightContain(anyString())).thenReturn(true);
+        // 默认抢到重建锁（leader 路径）；"跟车"路径的用例单独打桩为 false
+        lenient().when(rebuildLock.tryLock(anyString())).thenReturn(true);
+        // 默认 L1 未命中（走 L2）；验证 L1 命中的用例单独打桩
+        lenient().when(localLinkCache.get(anyString())).thenReturn(null);
+        // 默认正常态（空许可放行）；验证降级拒绝的用例单独打桩
+        lenient().when(degradationGuard.tryAcquirePermit()).thenReturn(DegradationGuard.Permit.NOOP);
+        lenient().when(degradationGuard.isDegraded()).thenReturn(false);
     }
 
     /** 统一的调用入口（V2 起签名含 IP/UA/Referer） */
@@ -89,6 +124,18 @@ class RedirectServiceImplTest {
         link.setValidDate(validDate);
         link.setDelFlag(0);
         return link;
+    }
+
+    @Test
+    void bloomRejectionReturnsNullWithoutTouchingCacheOrDb() {
+        // V3.1 防穿透：布隆过滤器判定「一定不存在」时直接返回，缓存与 DB 都不查
+        when(bloomFilter.mightContain("nope")).thenReturn(false);
+
+        assertNull(resolve("nope"));
+
+        verify(valueOperations, never()).get(anyString());
+        verify(linkMapper, never()).selectOne(any());
+        verify(visitRecorder, never()).record(anyString(), anyString(), anyString(), any());
     }
 
     @Test
@@ -221,5 +268,178 @@ class RedirectServiceImplTest {
     void isRedirectableBranches() {
         assertFalse(redirectService.isRedirectable(cacheDTO(1, 2, LocalDateTime.now().minusSeconds(1))));
         assertTrue(redirectService.isRedirectable(cacheDTO(0, 1, null)));
+    }
+
+    // ==================== V3.2 防击穿 ====================
+
+    @Test
+    void logicallyExpiredCacheReturnsStaleValueAndTriggersRefresh() throws Exception {
+        // 逻辑过期：请求线程立即拿到旧值（不阻塞），同时触发后台异步重建
+        LinkCacheDTO dto = cacheDTO(0, 1, null);
+        dto.setLogicalExpireAt(System.currentTimeMillis() - 1000);
+        when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(dto));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+        verify(cacheRefreshService).refreshAsync("abc123");
+    }
+
+    @Test
+    void freshCacheDoesNotTriggerRefresh() throws Exception {
+        LinkCacheDTO dto = cacheDTO(0, 1, null);
+        dto.setLogicalExpireAt(System.currentTimeMillis() + 60_000);
+        when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(dto));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+        verify(cacheRefreshService, never()).refreshAsync(anyString());
+    }
+
+    @Test
+    void legacyCacheValueWithoutLogicalExpireAtIsTreatedAsFresh() throws Exception {
+        // 兼容升级前的存量缓存：没有 logicalExpireAt 字段时不能判定为过期，
+        // 否则升级瞬间会触发全量刷新（自己制造一次小雪崩）
+        when(valueOperations.get(KEY))
+                .thenReturn("{\"originalUrl\":\"https://example.com/target\",\"enableStatus\":0,\"validType\":1}");
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+        verify(cacheRefreshService, never()).refreshAsync(anyString());
+    }
+
+    @Test
+    void refreshTriggerFailureDoesNotBreakRedirect() throws Exception {
+        LinkCacheDTO dto = cacheDTO(0, 1, null);
+        dto.setLogicalExpireAt(System.currentTimeMillis() - 1000);
+        when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(dto));
+        doThrow(new RuntimeException("executor rejected")).when(cacheRefreshService).refreshAsync(anyString());
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+    }
+
+    @Test
+    void mutexRebuildWaitsAndReusesFilledCache() throws Exception {
+        // 没抢到锁 → 等待 leader 回填 → 直接复用，本轮不再回源 DB
+        when(rebuildLock.tryLock("abc123")).thenReturn(false);
+        LinkCacheDTO dto = cacheDTO(0, 1, null);
+        when(valueOperations.get(KEY)).thenReturn(null, objectMapper.writeValueAsString(dto));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+
+        verify(linkMapper, never()).selectOne(any());
+        // 跟车者不能释放 leader 的锁
+        verify(rebuildLock, never()).unlock(anyString());
+    }
+
+    @Test
+    void mutexRebuildLeaderFillsCacheAndUnlocks() {
+        when(valueOperations.get(KEY)).thenReturn(null);
+        when(linkMapper.selectOne(any())).thenReturn(linkDO(0, 1, null));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+
+        verify(valueOperations).set(eq(KEY), anyString(), any(Duration.class));
+        verify(rebuildLock).unlock("abc123");
+    }
+
+    @Test
+    void mutexRebuildFallsBackToDbWithoutFillingWhenWaitTimesOut() {
+        // leader 迟迟未回填（慢/异常）：跟车者自行回源兜底，但不再写缓存，避免写放大
+        when(rebuildLock.tryLock("abc123")).thenReturn(false);
+        when(valueOperations.get(KEY)).thenReturn(null);
+        when(linkMapper.selectOne(any())).thenReturn(linkDO(0, 1, null));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+
+        verify(valueOperations, never()).set(anyString(), anyString(), any(Duration.class));
+        verify(rebuildLock, never()).unlock(anyString());
+    }
+
+    @Test
+    void mutexRebuildLeaderReleasesLockOnFailure() {
+        // leader 回源抛异常时也必须解锁，否则同 key 在锁 TTL 内无法重建
+        when(valueOperations.get(KEY)).thenReturn(null);
+        when(linkMapper.selectOne(any())).thenThrow(new RuntimeException("db down"));
+
+        assertThrows(RuntimeException.class, () -> resolve("abc123"));
+
+        verify(rebuildLock).unlock("abc123");
+    }
+
+    // ==================== V3.3 多级缓存 + 降级保护 ====================
+
+    @Test
+    void localCacheHitSkipsRedisAndDb() {
+        // L1 命中：热点短码不出进程，既不查 L2 也不查 DB
+        LinkCacheDTO local = cacheDTO(0, 1, null);
+        local.setLogicalExpireAt(System.currentTimeMillis() + 60_000);
+        when(localLinkCache.get(KEY)).thenReturn(local);
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+
+        verify(stringRedisTemplate, never()).opsForValue();
+        verify(linkMapper, never()).selectOne(any());
+    }
+
+    @Test
+    void logicallyExpiredLocalHitReturnsStaleValueAndTriggersRefresh() {
+        LinkCacheDTO local = cacheDTO(0, 1, null);
+        local.setLogicalExpireAt(System.currentTimeMillis() - 1_000);
+        when(localLinkCache.get(KEY)).thenReturn(local);
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+        verify(cacheRefreshService).refreshAsync("abc123");
+    }
+
+    @Test
+    void l2HitFillsLocalCache() throws Exception {
+        when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(cacheDTO(0, 1, null)));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+
+        verify(localLinkCache).put(eq(KEY), any(LinkCacheDTO.class));
+    }
+
+    @Test
+    void redisFailureMarksDegradedAndFallsBackToDb() {
+        when(valueOperations.get(KEY)).thenThrow(new RuntimeException("redis down"));
+        when(linkMapper.selectOne(any())).thenReturn(linkDO(0, 1, null));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+
+        verify(degradationGuard).markDegraded(anyString());
+        verify(linkMapper).selectOne(any());
+    }
+
+    @Test
+    void healthyRedisClearsDegradedState() throws Exception {
+        when(valueOperations.get(KEY)).thenReturn(objectMapper.writeValueAsString(cacheDTO(0, 1, null)));
+
+        resolve("abc123");
+
+        verify(degradationGuard).markHealthy();
+    }
+
+    @Test
+    void degradedWithoutDbPermitFailsFastWithDegradedException() {
+        // 降级态且回源并发已满：快速失败（503），绝不能继续压 DB
+        when(valueOperations.get(KEY)).thenReturn(null);
+        when(degradationGuard.tryAcquirePermit()).thenReturn(null);
+
+        assertThrows(DegradedException.class, () -> resolve("abc123"));
+
+        verify(linkMapper, never()).selectOne(any());
+        // 抢到的重建锁必须释放，否则同 key 在锁 TTL 内无法重建
+        verify(rebuildLock).unlock("abc123");
+    }
+
+    @Test
+    void degradedWithDbPermitStillServesRequest() {
+        // 降级态但还有许可：正常回源并归还许可
+        when(valueOperations.get(KEY)).thenReturn(null);
+        when(degradationGuard.tryAcquirePermit()).thenReturn(() -> {
+        });
+        when(linkMapper.selectOne(any())).thenReturn(linkDO(0, 1, null));
+
+        assertEquals("https://example.com/target", resolve("abc123"));
+
+        verify(linkMapper).selectOne(any());
     }
 }

@@ -3,7 +3,10 @@ package com.shortlink.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.shortlink.bloom.ShortLinkBloomFilter;
+import com.shortlink.cache.CacheInvalidationPublisher;
 import com.shortlink.cache.CacheKeyBuilder;
+import com.shortlink.cache.LocalLinkCache;
 import com.shortlink.codec.Base62Codec;
 import com.shortlink.common.exception.BizException;
 import com.shortlink.config.ShortLinkProperties;
@@ -55,6 +58,9 @@ public class LinkServiceImpl implements LinkService {
     private final IdGenerator idGenerator;
     private final ShortLinkProperties properties;
     private final StringRedisTemplate stringRedisTemplate;
+    private final ShortLinkBloomFilter bloomFilter;
+    private final LocalLinkCache localLinkCache;
+    private final CacheInvalidationPublisher cacheInvalidationPublisher;
 
     @Override
     public LinkRespDTO createLink(LinkCreateReqDTO reqDTO) {
@@ -68,6 +74,8 @@ public class LinkServiceImpl implements LinkService {
             LinkDO link = buildLinkDO(id, reqDTO);
             try {
                 linkMapper.insert(link);
+                // 同步写入布隆过滤器：否则新短码会被自己的防穿透拦截误判为「一定不存在」
+                bloomFilter.add(link.getCode());
                 log.info("创建短链: id={}, code={}, url={}", link.getId(), link.getCode(), link.getOriginalUrl());
                 return toRespDTO(link);
             } catch (DuplicateKeyException e) {
@@ -75,7 +83,10 @@ public class LinkServiceImpl implements LinkService {
                     log.error("短码连续冲突，放弃创建: attempts={}, code={}", attempt, link.getCode(), e);
                     throw new BizException("短码生成冲突，请稍后重试");
                 }
-                log.warn("短码冲突，重新发号重试: attempt={}, code={}", attempt, link.getCode());
+                // 冲突说明号源可能与 DB 不一致（如 Redis 从旧快照恢复）：先自愈再重试，
+                // 否则只会在已用过的号上反复撞车
+                log.warn("短码冲突，触发发号器自愈并重试: attempt={}, code={}", attempt, link.getCode());
+                idGenerator.recoverAfterConflict();
             }
         }
     }
@@ -148,14 +159,23 @@ public class LinkServiceImpl implements LinkService {
     }
 
     /**
-     * 删除短链缓存（含空值缓存）。失败不阻断主流程：DB 是事实源，TTL 到期后自动最终一致
+     * 删除短链缓存（V3.3 起为两级 + 广播）。失败不阻断主流程：DB 是事实源，
+     * L2 由 TTL 兜底、L1 由更短的 TTL 兜底，最终一致。
+     *
+     * 顺序：本实例 L1 → L2 → 广播其余实例的 L1。
      */
     private void evictLinkCache(String code) {
+        String key = CacheKeyBuilder.buildLinkKey(properties.getDomain(), code);
+        // 1) 本实例 L1：直接失效
+        localLinkCache.invalidate(key);
+        // 2) L2 Redis
         try {
-            stringRedisTemplate.delete(CacheKeyBuilder.buildLinkKey(properties.getDomain(), code));
+            stringRedisTemplate.delete(key);
         } catch (Exception e) {
             log.error("删除短链缓存失败, code={}", code, e);
         }
+        // 3) 其他实例的 L1：广播失效（尽力而为，Redis 不可用时由 L1 TTL 兜底）
+        cacheInvalidationPublisher.publish(code);
     }
 
     @Override

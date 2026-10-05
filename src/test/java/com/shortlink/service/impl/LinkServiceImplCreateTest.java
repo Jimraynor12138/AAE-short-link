@@ -1,6 +1,9 @@
 package com.shortlink.service.impl;
 
+import com.shortlink.bloom.ShortLinkBloomFilter;
 import com.shortlink.codec.Base62Codec;
+import com.shortlink.cache.CacheInvalidationPublisher;
+import com.shortlink.cache.LocalLinkCache;
 import com.shortlink.common.exception.BizException;
 import com.shortlink.config.ShortLinkProperties;
 import com.shortlink.dao.LinkMapper;
@@ -39,13 +42,23 @@ class LinkServiceImplCreateTest {
     @Mock
     private StringRedisTemplate stringRedisTemplate;
 
+    @Mock
+    private LocalLinkCache localLinkCache;
+
+    @Mock
+    private CacheInvalidationPublisher cacheInvalidationPublisher;
+
+    @Mock
+    private ShortLinkBloomFilter bloomFilter;
+
     private LinkServiceImpl linkService;
 
     @BeforeEach
     void setUp() {
         ShortLinkProperties properties = new ShortLinkProperties();
         properties.setDomain("localhost:8080");
-        linkService = new LinkServiceImpl(linkMapper, idGenerator, properties, stringRedisTemplate);
+        linkService = new LinkServiceImpl(linkMapper, idGenerator, properties, stringRedisTemplate, bloomFilter,
+                localLinkCache, cacheInvalidationPublisher);
     }
 
     private LinkCreateReqDTO buildReq(String url, Integer validType) {

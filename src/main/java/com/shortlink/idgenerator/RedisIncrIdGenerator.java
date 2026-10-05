@@ -35,16 +35,52 @@ public class RedisIncrIdGenerator implements IdGenerator {
     private final JdbcTemplate jdbcTemplate;
 
     /**
-     * 启动时播种：仅当 key 不存在时写入 DB 当前最大 id，避免重启后从 1 开始造成重号
+     * 启动时播种 / 自愈：把计数抬升到「不小于 DB 当前最大 id」。
+     *
+     * 注意这里不是简单的 SETNX：
+     * - key 不存在 → 播种为 dbMax（避免从 1 开始重号）
+     * - key 存在但**落后于 dbMax**（Redis 从旧快照恢复、被清空后重建等）→ 抬升到 dbMax
+     * - key 已领先 → 不动
+     * 抬升用 INCRBY 而不是 SET，保证操作单调（绝不会把计数改小、不会与并发 INCR 冲突）。
      */
     @PostConstruct
     public void seedIfAbsent() {
         long dbMaxId = queryDbMaxId();
-        Boolean absent = stringRedisTemplate.opsForValue().setIfAbsent(ID_KEY, String.valueOf(dbMaxId));
-        if (Boolean.TRUE.equals(absent)) {
-            log.info("Redis 发号器已播种: key={}, seed={}", ID_KEY, dbMaxId);
-        } else {
-            log.info("Redis 发号器已存在，沿用当前值: key={}", ID_KEY);
+        raiseCounterTo(dbMaxId);
+        log.info("Redis 发号器就绪: key={}, dbMaxId={}, current={}", ID_KEY, dbMaxId, currentCounter());
+    }
+
+    @Override
+    public void recoverAfterConflict() {
+        // 短码冲突说明号源落后于 DB：抬升到 DB 最大值之上再重试
+        long dbMaxId = queryDbMaxId();
+        raiseCounterTo(dbMaxId);
+        log.warn("短码冲突自愈：发号器已抬升至 {}(dbMaxId={})", currentCounter(), dbMaxId);
+    }
+
+    /**
+     * 单调抬升计数到至少 minValue（INCRBY 保证只增不减）
+     */
+    private void raiseCounterTo(long minValue) {
+        if (minValue <= 0) {
+            return;
+        }
+        long current = currentCounter();
+        if (current < minValue) {
+            stringRedisTemplate.opsForValue().increment(ID_KEY, minValue - current);
+        }
+    }
+
+    private long currentCounter() {
+        String value = stringRedisTemplate.opsForValue().get(ID_KEY);
+        if (value == null) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            log.warn("发号器计数异常，按 0 处理并按 DB 重新抬升: value={}", value);
+            return 0L;
         }
     }
 

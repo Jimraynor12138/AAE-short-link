@@ -45,6 +45,38 @@ shortlink:
     # 消费幂等 key 保留时间（秒）= 允许的重投窗口。
     # key 数量 ≈ 峰值 QPS × TTL，所以不要取大值（60s 已覆盖秒级重投）
     idempotent-ttl-seconds: 60
+  # 号段模式发号（V3.5）：一次申请一段号放内存里发，双 buffer 异步预取
+  segment:
+    # t_segment 的业务标识（一个业务一行）
+    biz-tag: short-link
+    # 号段长度：越大 DB 压力越小、重启浪费越多
+    step: 1000
+    # 当前段剩余不足该百分比时异步预取下一段
+    prefetch-remaining-percent: 10
+    alloc-retry-times: 3
+    alloc-retry-interval-millis: 50
+  # 雪花算法发号（V3.5）：完全本地生成，需处理时钟回拨与机器 ID 分配
+  snowflake:
+    # 机器 ID（0~1023）：多实例必须互不相同，生产由配置中心/K8s 序号注入
+    worker-id: 0
+    # 自定义纪元（2024-01-01T00:00:00Z）：比 1970 起算能显著缩小 ID 数值 → 短码更短
+    epoch-millis: 1704067200000
+    # 允许的时钟回拨上限（毫秒）：超过则拒绝发号（宁可创建失败也不出重复 ID）
+    max-backward-millis: 5
+  # 布隆过滤器（V3.1：防缓存穿透；V3.4：改为本地位图 + 缺失回查确认）
+  bloom:
+    enabled: true
+    # 预计短码总量（估小了误判率会上升）
+    capacity: 1000000
+    # 目标误判率：0.01 表示约 1% 的不存在短码会被放行到缓存/DB
+    false-positive-rate: 0.01
+    key: short-link:bloom:codes
+    init-flag-key: short-link:bloom:init
+    warmup-batch-size: 1000
+    # 位图整块加载进本进程内存（约 1.1MB），跳转查询零 Redis RTT。
+    # 本地判定"不存在"时回查一次 Redis 确认：多实例下本地快照可能过期
+    # （其他实例刚创建的短码），直接信任本地会把正常短链误拦成 404
+    verify-on-local-miss: true
   # 统计快照落库（V2：脏标记 + 定时批量 upsert）
   stats-persist:
     # 毫秒；@Scheduled 只认毫秒数字符串，写 "2s" 会启动失败
@@ -64,6 +96,40 @@ shortlink:
     null-ttl-seconds: 60
     # 统计 key TTL（秒）：默认 7 天
     stats-ttl-seconds: 604800
+    # 防击穿（V3.2）
+    anti-breakdown:
+      # 逻辑过期 + 异步刷新：命中但已逻辑过期时，先返回旧值（跳转可接受"稍旧"），后台异步重建
+      logical-expire-enabled: true
+      # 逻辑过期时长（秒）：应远小于物理 TTL（1800+抖动），留出足够的异步刷新窗口
+      logical-expire-seconds: 300
+      # 互斥重建：缓存未命中时只放一个请求回源，其余短暂等待其回填
+      mutex-rebuild-enabled: true
+      mutex-wait-millis: 200
+      mutex-wait-step-millis: 20
+      refresh-pool-size: 2
+      refresh-queue-capacity: 1000
+    # 本地一级缓存（V3.3，Caffeine）：解决热点 key 反复打同一 Redis 分片
+    local:
+      enabled: true
+      # 单实例最多缓存条目数
+      max-size: 10000
+      # 本地 TTL 必须远小于 Redis TTL：多实例失效消息丢失时，不一致最多存活这么久
+      ttl-seconds: 30
+      record-stats: true
+    # 降级保护（V3.3 防雪崩）：Redis 故障时给回源 DB 加并发闸门
+    degradation:
+      enabled: true
+      max-concurrent-db-queries: 20
+      acquire-timeout-millis: 50
+      degrade-window-seconds: 10
+
+  # 写接口限流（V3.3）：创建/修改/删除按客户端 IP 滑动窗口限流
+  # 注意：必须挂在 shortlink 下（RateLimit 是 ShortLinkProperties 的嵌套字段），
+  # 写成顶层 rate-limit 不会绑定，配置看起来"生效了"其实全用了默认值
+  rate-limit:
+    enabled: true
+    window-seconds: 60
+    write-limit-per-window: 120
 
 # 接口文档
 springdoc:

@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS `t_sequence` (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `t_link` (
     `id`            BIGINT       NOT NULL COMMENT '全局唯一 ID（发号器产生，IdType.INPUT）',
-    `code`          VARCHAR(16)  NOT NULL COMMENT '短码（Base62 编码）',
+    -- 短码必须区分大小写（COLLATE utf8mb4_bin）：Base62 字符集同时含 a-z 与 A-Z，
+    -- 若沿用默认的 utf8mb4_general_ci（大小写不敏感），"2A" 会被判为与 "2a" 重复，
+    -- 等于白白浪费一半码空间，且 /2A 可能命中 /2a 的记录。
+    `code`          VARCHAR(16)  COLLATE utf8mb4_bin NOT NULL COMMENT '短码（Base62 编码，区分大小写）',
     `domain`        VARCHAR(128) NOT NULL COMMENT '短链域名',
     `original_url`  VARCHAR(768) NOT NULL COMMENT '原始长 URL',
     `gid`           VARCHAR(32)  NOT NULL DEFAULT 'default' COMMENT '分组标识',
@@ -48,7 +51,8 @@ CREATE TABLE IF NOT EXISTS `t_link` (
 CREATE TABLE IF NOT EXISTS `t_link_stats` (
     `id`            BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
     `link_id`       BIGINT      NOT NULL COMMENT '短链 ID',
-    `code`          VARCHAR(16) NOT NULL COMMENT '短码',
+    -- 与 t_link.code 保持一致：Base62 短码含大小写，必须区分（否则 2A/2a 在统计维度上会串）
+    `code`          VARCHAR(16) COLLATE utf8mb4_bin NOT NULL COMMENT '短码（Base62 编码，区分大小写）',
     `date`          DATE        NOT NULL COMMENT '统计日期',
     `pv`            BIGINT      NOT NULL DEFAULT 0 COMMENT '点击量',
     `uv`            BIGINT      NOT NULL DEFAULT 0 COMMENT '独立访客数',
@@ -99,3 +103,22 @@ CREATE TABLE IF NOT EXISTS `t_user` (
 -- ------------------------------------------------------------
 INSERT IGNORE INTO `t_group` (`gid`, `name`, `sort_order`)
 VALUES ('default', '默认分组', 0);
+
+-- ------------------------------------------------------------
+-- 6. 号段分配表（V3.5：号段模式发号）
+--    一行一个业务：max_id = 已分配到的最大号；一次发号 = 一次 UPDATE（按主键行锁保证原子）。
+--    与 V0 的 t_sequence（每发一号 INSERT 一行）对比：
+--      - 发号的 DB 压力降为 1/step（默认 1/1000）
+--      - 表不再增长，永远只有一行
+--    max_id 的初始值会在应用启动时抬升到「不小于 t_link 当前最大 id」，避免与其他发号器切换时重号。
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `t_segment` (
+    `biz_tag`     VARCHAR(64) NOT NULL COMMENT '业务标识（一行一个业务）',
+    `max_id`      BIGINT      NOT NULL DEFAULT 0 COMMENT '当前已分配到的最大号',
+    `step`        INT         NOT NULL DEFAULT 1000 COMMENT '号段长度（一次分配的号数）',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`biz_tag`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '号段分配表';
+
+INSERT IGNORE INTO `t_segment` (`biz_tag`, `max_id`, `step`)
+VALUES ('short-link', 0, 1000);

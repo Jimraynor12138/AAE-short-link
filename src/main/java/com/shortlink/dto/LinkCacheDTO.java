@@ -27,4 +27,15 @@ public class LinkCacheDTO {
 
     /** 过期时间 */
     private LocalDateTime validDate;
+
+    /**
+     * 逻辑过期时间（epoch 毫秒，V3.2 防击穿用）。
+     *
+     * 与物理 TTL 的区别：物理 TTL 到期 key 就消失（下一个请求必然回源，热点码会击穿 DB）；
+     * 逻辑过期到期后 key 仍在，请求可以先拿到「稍旧但依然可用」的值立即返回，
+     * 由后台异步重建 —— 跳转场景下 URL 基本不变，可接受短暂陈旧，换取请求线程零阻塞。
+     *
+     * 为兼容历史缓存值（该字段不存在），读取侧按 null 处理（视为未逻辑过期）。
+     */
+    private Long logicalExpireAt;
 }
