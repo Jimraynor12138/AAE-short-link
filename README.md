@@ -319,6 +319,7 @@ mvn -B test "-Dtest=IdGeneratorBenchmarkTest" "-Dshortlink.benchmark=true"
 | [`docs/01-需求分析与技术方案.md`](docs/01-需求分析与技术方案.md) | 业务流程、表设计、发号方案对比、Redis 场景、缓存三大问题、MQ 取舍、瓶颈与分库分表分析、整体架构、技术栈、V0→V4 路线 |
 | [`docs/02-数据库设计.md`](docs/02-数据库设计.md) | 表结构、索引、"为什么不用外键"、短码排序规则说明 |
 | [`docs/03-开发日志.md`](docs/03-开发日志.md) | **逐版本的做了什么 / 关键决策 / 踩坑 / 验证数据**（信息量最大） |
+| [`docs/04-代码地图与阅读指南.md`](docs/04-代码地图与阅读指南.md) | 当前配置下真正生效的类与链路、条件装配表、物理过期 vs 逻辑过期、常见误解、30 分钟读码路线 |
 | [`docs/benchmark/`](docs/benchmark/) | V1 / V2 / V3.5 压测报告 + JMeter 脚本与原始结果 |
 
 ---
